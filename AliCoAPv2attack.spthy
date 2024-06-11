@@ -1,0 +1,115 @@
+theory AliCoAP begin
+
+
+functions: AES_CBC_ENC/3, AES_CBC_DEC/3, hmacmd5/2, up/1 ,SHA256/1
+equations: AES_CBC_DEC(AES_CBC_ENC(m,k,iv),k,iv) = m
+
+
+/* 建立Device/Server */
+rule setup_TA_Cloud:
+  [ Fr(~DeviceName1), Fr(~DeviceSecret1),Fr(~DeviceName2), Fr(~DeviceSecret2)]
+--[  ]->
+  [ Transcript(~DeviceName1,~DeviceSecret1),
+    !ServerSharedKeyWithDevice($ProductKey,$Server,~DeviceName1,~DeviceSecret1), 
+    ClientRun(diff(<~DeviceName1,~DeviceSecret1>,<~DeviceName2,~DeviceSecret2>))
+  ]
+
+rule transcript:
+  [ Transcript(DeviceName1,DeviceSecret1)  ]
+--[ ]->
+  [ Out(DeviceName1) ]
+
+
+
+/*rule reveal:
+  [ !SharedKeyWithServer(X, k) ]
+--[ Reveal(X,k),Init_once('1') ]->
+  [ Out(k), Reveal(X,k)]
+*/
+
+/* 1 */
+rule DeviceRequest:
+let
+  Clientid=<$ProductKey,DeviceName>
+  sign=hmacmd5(<Clientid,DeviceName,$ProductKey,~seq>,DeviceSecret)
+in
+  [ Fr(~seq),ClientRun(<DeviceName,DeviceSecret>) ]
+--[ Secret_Dev(DeviceSecret) ]->
+  [ Out(<SHA256(<~seq,Clientid>),~seq,sign>),DeviceRequested($ProductKey,DeviceName,DeviceSecret,~seq)]
+
+/* 2 */
+rule Serverauth:
+let
+  Clientid=<$ProductKey,DeviceName>
+  signs=hmacmd5(<Clientid,DeviceName,$ProductKey,seq>,DeviceSecret)
+  SHA=SHA256(<seq,Clientid>)
+
+in
+  [ In(<SHAs,seq,sign>),!ServerSharedKeyWithDevice($ProductKey,$Server,DeviceName,DeviceSecret),
+    Fr(~random),Fr(~token),Fr(~seqoffset)
+  ]
+--[ Eq(SHAs,SHA),Eq(signs,sign)]->
+  [ Out(<~random,~seqoffset,~token>) ,ServerWaiting1($ProductKey,$Server,DeviceName,DeviceSecret,~random,~token,~seqoffset)]
+
+/* 3 */
+rule DeviceGenKey:
+let
+  AESkey=SHA256(<DeviceSecret,random>)
+  cipher=AES_CBC_ENC(~payload,AESkey,'iv')
+  Authp=up(seqoffset)
+  Authcipher=AES_CBC_ENC(Authp,AESkey,'iv')
+in
+  [ Fr(~payload),In(<random,seqoffset,token>),DeviceRequested($ProductKey,DeviceName,DeviceSecret,seq)]
+--[ Secret_Dev(DeviceSecret)
+    ]->
+  [ Out(<Authcipher,cipher>),DeviceWaiting1($ProductKey,DeviceName,DeviceSecret,seq,~payload,AESkey)]
+
+/* 4 */
+rule ServerAcceptData: 
+let
+  AESkey=SHA256(<DeviceSecret,random>)
+  payload=AES_CBC_DEC(cipher,AESkey,'iv')
+  Authp=up(seqoffset)
+  Authciphers=AES_CBC_ENC(Authp,AESkey,'iv')
+  c=AES_CBC_ENC('Success',AESkey,'iv')
+in
+  [ In(<Authcipher,cipher>),ServerWaiting1($ProductKey,$Server,DeviceName,DeviceSecret,random,token,seqoffset)]
+--[ Eq(Authcipher,Authciphers),ServerConfig(DeviceName,AESkey),Secret_Dev(DeviceSecret)
+   ,Commit($Server,DeviceName,<'Server','Device',AESkey>)
+   ,Running($Server,DeviceName,<'Server','Device',payload>)  ]->
+  [ Out(c)]
+
+/* 5 */
+rule DeviceCON: 
+let
+  cs=AES_CBC_ENC('Success',AESkey,'iv')
+in
+  [ In(c),DeviceWaiting1($ProductKey,DeviceName,DeviceSecret,seq,payload,AESkey)]
+--[ Eq(c,cs),DeviceConfig(DeviceName,AESkey) ,Secret_Dev(DeviceSecret)
+   ,Running(DeviceName,$Server,<'Server','Device',AESkey>) 
+   ,Commit(DeviceName,$Server,<'Server','Device',payload>)]->
+  [ ]
+
+
+
+restriction Verif:
+"
+    All x y #i. Eq(x,y) @ i ==> x = y
+"
+/*
+restriction Init:
+" 
+   All #i #j x. Init_once(x)@i & Init_once(x)@j ==> #i=#j
+"
+
+restriction Neq:
+"
+    All x #i. Neq(x,x) @ i ==> F
+"
+#ifdef timethis
+#endif
+*/
+
+
+end
+

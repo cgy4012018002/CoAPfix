@@ -1,0 +1,135 @@
+theory AliCoAP begin
+
+
+functions: AES_CBC_ENC/3, AES_CBC_DEC/3, hmacmd5/2, up/1 ,SHA256/1
+equations: AES_CBC_DEC(AES_CBC_ENC(m,k,iv),k,iv) = m
+
+
+/* 建立Device/Server */
+rule setup_TA_Cloud:
+  [ Fr(~DeviceName), Fr(~DeviceSecret)]
+--[  ]->
+  [ !ServerSharedKeyWithDevice($ProductKey,$Server,~DeviceName,~DeviceSecret) ]
+
+/*rule reveal:
+  [ !SharedKeyWithServer(X, k) ]
+--[ Reveal(X,k),Init_once('1') ]->
+  [ Out(k), Reveal(X,k)]
+*/
+
+/* 1 */
+rule DeviceRequest:
+let
+  Clientid=<$ProductKey,DeviceName>
+  sign=hmacmd5(<Clientid,DeviceName,$ProductKey,~seq>,DeviceSecret)
+in
+  [ Fr(~seq),!ServerSharedKeyWithDevice($ProductKey,$Server,DeviceName,DeviceSecret) ]
+--[ Secret_Dev(DeviceSecret) ]->
+  [ Out(<Clientid,~seq,sign>),DeviceRequested($ProductKey,DeviceName,DeviceSecret,~seq)]
+
+/* 2 */
+rule Serverauth:
+let
+  DeviceNames=fst(Clientid)
+  signs=hmacmd5(<Clientid,DeviceName,$ProductKey,seq>,DeviceSecret)
+
+in
+  [ In(<Clientid,seq,sign>),!ServerSharedKeyWithDevice($ProductKey,$Server,DeviceName,DeviceSecret),
+    Fr(~random),Fr(~token),Fr(~seqoffset)
+  ]
+--[ Eq(DeviceName,DeviceNames),Eq(signs,sign)]->
+  [ Out(<~random,~seqoffset,~token>) ,ServerWaiting1($ProductKey,$Server,DeviceName,DeviceSecret,~random,~token,~seqoffset)]
+
+/* 3 */
+rule DeviceGenKey:
+let
+  AESkey=SHA256(<DeviceSecret,random>)
+  cipher=AES_CBC_ENC(~payload,AESkey,'iv')
+  Authp=up(seqoffset)
+  Authcipher=AES_CBC_ENC(Authp,AESkey,'iv')
+in
+  [ Fr(~payload),In(<random,seqoffset,token>),DeviceRequested($ProductKey,DeviceName,DeviceSecret,seq)]
+--[ Secret_Dev(DeviceSecret)
+    ]->
+  [ Out(<Authcipher,cipher>),DeviceWaiting1($ProductKey,DeviceName,DeviceSecret,seq,~payload,AESkey)]
+
+/* 4 */
+rule ServerAcceptData: 
+let
+  AESkey=SHA256(<DeviceSecret,random>)
+  payload=AES_CBC_DEC(cipher,AESkey,'iv')
+  Authp=up(seqoffset)
+  Authciphers=AES_CBC_ENC(Authp,AESkey,'iv')
+  c=AES_CBC_ENC('Success',AESkey,'iv')
+in
+  [ In(<Authcipher,cipher>),ServerWaiting1($ProductKey,$Server,DeviceName,DeviceSecret,random,token,seqoffset)]
+--[ Eq(Authcipher,Authciphers),ServerConfig(DeviceName,AESkey),Secret_Dev(DeviceSecret)
+   ,Commit($Server,DeviceName,<'Server','Device',AESkey>)
+   ,Running($Server,DeviceName,<'Server','Device',payload>)  ]->
+  [ Out(c)]
+
+/* 5 */
+rule DeviceCON: 
+let
+  cs=AES_CBC_ENC('Success',AESkey,'iv')
+in
+  [ In(c),DeviceWaiting1($ProductKey,DeviceName,DeviceSecret,seq,payload,AESkey)]
+--[ Eq(c,cs),DeviceConfig(DeviceName,AESkey) ,Secret_Dev(DeviceSecret)
+   ,Running(DeviceName,$Server,<'Server','Device',AESkey>) 
+   ,Commit(DeviceName,$Server,<'Server','Device',payload>)]->
+  [ ]
+
+
+
+restriction Verif:
+"
+    All x y #i. Eq(x,y) @ i ==> x = y
+"
+/*
+restriction Init:
+" 
+   All #i #j x. Init_once(x)@i & Init_once(x)@j ==> #i=#j
+"
+
+restriction Neq:
+"
+    All x #i. Neq(x,x) @ i ==> F
+"
+#ifdef timethis
+#endif
+*/
+
+lemma Secrect_AESkey: 
+"
+   All A x #i .   DeviceConfig(A,x)@i ==> not (Ex #j. K(x)@j)
+"
+lemma Secrect_Devkey: 
+"
+   All x #i .   Secret_Dev(x)@i ==> not (Ex #j. K(x)@j)
+"
+
+lemma weak_agreement:
+"All a b t1 #i.
+	Commit(a,b,t1) @i
+	==> (Ex t2 #j. Running(b,a,t2) @j)
+"
+
+lemma noninjective_agreement:
+"All a b t #i.
+	Commit(a,b,t) @i
+	==> (Ex #j. Running(b,a,t) @j)
+"
+
+lemma injectiveagreement:
+"All A B t #i.
+	Commit(A,B,t) @i
+	==> (Ex #j. Running(B,A,t) @j
+		& j < i
+		& not (Ex A2 B2 #i2. Commit(A2,B2,t) @i2
+		& not (#i2 = #i)))
+"
+
+
+
+end
+
